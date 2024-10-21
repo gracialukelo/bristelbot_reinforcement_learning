@@ -48,17 +48,24 @@ class Brush:
 
 # Klasse zur Definition eines BrushBots mit Rotationsdynamik
 class BrushBot:
-    def __init__(self, agent_name, w1, w2, x=0.0, y=0.0, mass=1.0, radius=0.03, seed=None):
+    def __init__(self, agent_name, w1, w2, x=0.0, y=0.0, mass=1.0, radius=0.03, seed=None, direction=None):
         if seed is not None:
             torch.manual_seed(seed)
             random.seed(seed)
             np.random.seed(seed)
 
+        self.v_net = 0.0
         self.agent_name = agent_name  # Name des Agenten für Logging-Zwecke
         self.position = torch.tensor([x, y], dtype=torch.float32, device=device)
-        self.direction = random.uniform(0, 2 * math.pi)  # Zufällige Startrichtung
-        self.dt = 0.01  # Wird später adaptiv angepasst
-        self.path = [self.position.clone().cpu().numpy()]
+        # Startrichtung hinzufügen
+        if direction is not None:
+            self.direction = direction
+        else:
+            self.direction = random.uniform(0, 2 * math.pi)  # Zufällige Startrichtung
+        self.dt = 0.0001  # Kleinerer Zeitschritt für langsamere Bewegung
+        self.path = [
+            self.position.clone().cpu().numpy()
+        ]  # clone der tensor ohne der urpringliche zuneinflußen und verwende numpy array
         self.mass = mass  # Masse des BrushBots
         self.radius = radius  # Radius des BrushBots
         self.inertia = 0.5 * self.mass * self.radius**2  # Trägheitsmoment eines Kreiszylinders
@@ -68,14 +75,15 @@ class BrushBot:
 
         # Physikalische Eigenschaften des Pinsels
         self.density_brush = 1090
-        self.m = 0.01
-        self.r = 0.25
-        self.l = 0.01
-        self.d = 2.4 / 1000
-        self.alpha = 1.3
-        self.E = 2.1 * 10**11
-        self.I = math.pi / 4 * (self.d / 2) ** 4
-        self.axis = 0.02
+        self.m = 0.01  # mass motor in kg
+        self.r = 0.25  # excentricity
+        self.l = 0.01  # length brush in m
+        self.d = 2.4 / 1000  # diameter brush in m
+        self.alpha = 1.3  # inital angle of the brush in radians
+        self.E = 2.1 * 10**11  # young modulus in Pa (from Paper)
+        self.I = math.pi / 4 * (self.d / 2) ** 4  # second area moment inm (from Paper)
+        self.axis = 0.02  # Distance between the brushes
+        # Calculate the individual properties of the brushes
         self.brush1 = Brush(self.m, w1, self.r, self.l, self.alpha, self.E, self.I)
         self.brush2 = Brush(self.m, w2, self.r, self.l, self.alpha, self.E, self.I)
 
@@ -85,42 +93,68 @@ class BrushBot:
 
     # Methode zur Aktualisierung der Geschwindigkeit basierend auf den Pinseln
     def update_velocity(self):
+        # Aktualisiere theta basierend auf der aktuellen Frequenz
+        self.brush1.theta = (self.m * self.brush1.w**2 * self.r * self.l**2 * math.cos(self.alpha)) / (
+            3 * self.E * self.I
+        )
+        self.brush2.theta = (self.m * self.brush2.w**2 * self.r * self.l**2 * math.cos(self.alpha)) / (
+            3 * self.E * self.I
+        )
+
         # Berechnung der Pinselgeschwindigkeiten
         self.brush1.v = (self.l * math.cos(self.alpha - self.brush1.theta) - self.l * math.cos(self.alpha)) * (
-            self.brush1.w / (2 * math.pi)
+            self.brush1.w / (2 * math.pi)  # left brush
         )
         self.brush2.v = (self.l * math.cos(self.alpha - self.brush2.theta) - self.l * math.cos(self.alpha)) * (
-            self.brush2.w / (2 * math.pi)
+            self.brush2.w / (2 * math.pi)  # right brush
         )
+
         # Berechnung der Netto-Vorwärtsgeschwindigkeit und der zusätzlichen Drehung
         self.v_net = (self.brush1.v + self.brush2.v) / 2
-        self.angular_velocity_input = (self.brush2.v - self.brush1.v) / self.axis
+        self.angular_velocity_input = (self.brush2.v - self.brush1.v) / self.axis  # angular velocity
 
     # Methode zur Aktualisierung des BrushBots
     def update(self):
-        self.update_velocity()
-        # Aktualisiere die Winkelgeschwindigkeit mit externem Drehmoment
-        self.angular_velocity += (self.external_torque / self.inertia) * self.dt
-        self.angular_velocity += self.angular_velocity_input  # Pinsel-induzierte Drehung
-        # Setze das externe Drehmoment zurück
-        self.external_torque = 0.0
-        # Aktualisiere die Richtung
-        self.direction += self.angular_velocity * self.dt
-        self.direction = self.direction % (2 * math.pi)
-        # Aktualisiere die Geschwindigkeit basierend auf v_net und direction
-        self.velocity = torch.tensor(
-            [self.v_net * math.cos(self.direction), self.v_net * math.sin(self.direction)],
+        # Aktualisiere die Geschwindigkeit basierend auf den Pinseln (interne Kräfte)
+        # Berechne die Beschleunigung durch die internen Kräfte (Pinselmotoren)
+        force_magnitude = self.v_net * self.mass / self.dt  # Dies ist ein vereinfachtes Modell
+
+        # Richtung der internen Kraft
+        force_direction = torch.tensor(
+            [math.cos(self.direction), math.sin(self.direction)],
             dtype=torch.float32,
             device=device,
         )
-        # Füge die externe Kraft hinzu
-        self.velocity += (self.external_force / self.mass) * self.dt
+
+        # Interne Kraft
+        internal_force = force_magnitude * force_direction
+
+        # Gesamtkräfte
+        total_force = internal_force + self.external_force
+
+        # Beschleunigung
+        acceleration = total_force / self.mass
+
+        # Aktualisiere die Geschwindigkeit
+        self.velocity += acceleration * self.dt
+
         # Setze die externe Kraft zurück
         self.external_force = torch.zeros(2, dtype=torch.float32, device=device)
+
         # Aktualisiere die Position
         self.update_position()
-        # Aktualisiere die Rotation für die Visualisierung
+
+        # Aktualisiere die Rotationsdynamik, falls aktiviert
+        self.angular_velocity += (self.external_torque / self.inertia) * self.dt
+        self.angular_velocity += self.angular_velocity_input  # Pinsel-induzierte Drehung
+        self.direction += self.angular_velocity * self.dt
+        self.direction = self.direction % (2 * math.pi)
         self.rotation += self.angular_velocity * self.dt
+        self.external_torque = 0.0
+        # Debugging-Ausgabe der Geschwindigkeit
+        logging.info(
+            f"{self.agent_name}: v_net={self.v_net}, velocity={self.velocity.cpu().numpy()}, position={self.position.cpu().numpy()}"
+        )
 
     # Methode zur Aktualisierung der Position basierend auf der Geschwindigkeit
     def update_position(self):
@@ -137,7 +171,7 @@ class BrushBot:
         omega_before = self.angular_velocity
         mass = self.mass
         inertia = self.inertia
-        ke_before = 0.5 * mass * np.linalg.norm(vel_before) ** 2 + 0.5 * inertia * omega_before ** 2
+        ke_before = 0.5 * mass * np.linalg.norm(vel_before) ** 2 + 0.5 * inertia * omega_before**2
 
         offset = 1e-5  # Kleiner Wert, um den Roboter leicht von der Wand zu entfernen
 
@@ -169,7 +203,7 @@ class BrushBot:
             # Geschwindigkeit und Winkelgeschwindigkeit nach der Kollision
             vel_after = self.velocity.clone().cpu().numpy()
             omega_after = self.angular_velocity
-            ke_after = 0.5 * mass * np.linalg.norm(vel_after) ** 2 + 0.5 * inertia * omega_after ** 2
+            ke_after = 0.5 * mass * np.linalg.norm(vel_after) ** 2 + 0.5 * inertia * omega_after**2
 
             # Impulsänderung
             impulse = mass * (vel_after - vel_before)
@@ -177,9 +211,15 @@ class BrushBot:
             torque = inertia * (omega_after - omega_before)
 
             # Ausgabe der Kollisionsinformationen
-            logging.info(f"Kollision mit der Wand erkannt für {self.agent_name} an Position {self.position.cpu().numpy()}")
-            logging.info(f"Vor der Kollision: velocity={vel_before}, angular_velocity={omega_before}, kinetic_energy={ke_before}")
-            logging.info(f"Nach der Kollision: velocity={vel_after}, angular_velocity={omega_after}, kinetic_energy={ke_after}")
+            logging.info(
+                f"Kollision mit der Wand erkannt für {self.agent_name} an Position {self.position.cpu().numpy()}"
+            )
+            logging.info(
+                f"Vor der Kollision: velocity={vel_before}, angular_velocity={omega_before}, kinetic_energy={ke_before}"
+            )
+            logging.info(
+                f"Nach der Kollision: velocity={vel_after}, angular_velocity={omega_after}, kinetic_energy={ke_after}"
+            )
             logging.info(f"Impulsänderung: {impulse}, Drehimpulsänderung: {torque}")
 
         return collided
@@ -237,27 +277,40 @@ class BrushBot:
     # Methode zum Aktualisieren des BrushBots mit einer Aktion
     def perform_action(self, action):
         # Setze die Aktion (Frequenzen der Pinsel)
-        self.brush1.w = action[0] * 500  # Skalierungsfaktor
-        self.brush2.w = action[1] * 500
+        self.brush1.w = action[0] * 100  # Skalierungsfaktor
+        self.brush2.w = action[1] * 100
+
+        # Aktualisiere die Geschwindigkeit basierend auf den neuen Frequenzen
+        self.update_velocity()
         # Aktualisiere den BrushBot
         self.update()
         # Rückgabe des aktuellen Zustands
         return self.get_state()
 
     # Methode zum Zufälligen Auswählen einer Aktion
+    #def sample_action(self):
+    #    freq1 = random.randint(1, 3)
+    #    freq2 = random.randint(1, 3)
+    #    while freq2 == freq1:
+    #        freq2 = random.randint(1, 3)
+    #    return [freq1, freq2]
+
     def sample_action(self):
-        freq1 = random.randint(1, 5)
-        freq2 = random.randint(1, 5)
-        while freq2 == freq1:
-            freq2 = random.randint(1, 5)
-        return [freq1, freq2]
+        freq = 3  # random.randint(1, 5)
+        return [freq, freq]
+
+    def set_velocity(self, new_velocity):
+        self.velocity = torch.tensor(new_velocity, dtype=torch.float32, device=device)
+
+    def set_angular_velocity(self, new_angular_velocity):
+        self.angular_velocity = new_angular_velocity
 
 
 # Ray Actor Klasse
 @ray.remote
 class RayBrushBot:
-    def __init__(self, agent_name, w1, w2, x=0.0, y=0.0, mass=1.0, radius=0.03, seed=None):
-        self.bot = BrushBot(agent_name, w1, w2, x, y, mass, radius, seed)
+    def __init__(self, agent_name, w1, w2, x=0.0, y=0.0, mass=1.0, radius=0.03, seed=None, direction=None):
+        self.bot = BrushBot(agent_name, w1, w2, x, y, mass, radius, seed, direction)
 
     def perform_action(self, action):
         return self.bot.perform_action(action)
@@ -309,6 +362,12 @@ class RayBrushBot:
 
     def get_agent_name(self):
         return self.bot.agent_name
+
+    def set_velocity(self, new_velocity):
+        self.bot.set_velocity(new_velocity)
+
+    def set_angular_velocity(self, new_angular_velocity):
+        self.bot.set_angular_velocity(new_angular_velocity)
 
 
 # Klasse zur Definition der Umgebung für den BrushBot-Schwarm mit Ray
@@ -372,9 +431,9 @@ class BrushBotSwarmParallelEnv(ParallelEnv):
         )  # Nicht direkt verwendet, aber für zukünftige Erweiterungen
 
         # Definition der Aktions- und Beobachtungsräume
-        self.action_spaces = {agent: gym.spaces.MultiDiscrete([6, 6]) for agent in self.agents}
+        self.action_spaces = {agent: gym.spaces.MultiDiscrete([3, 3]) for agent in self.agents}
         low = np.array([-np.inf, -np.inf, 0.0, 0, 0], dtype=np.float32)
-        high = np.array([np.inf, np.inf, 2 * math.pi, 600, 600], dtype=np.float32)
+        high = np.array([np.inf, np.inf, 2 * math.pi, 300, 300], dtype=np.float32)
         self.observation_spaces = {agent: gym.spaces.Box(low=low, high=high, dtype=np.float32) for agent in self.agents}
 
         # Liste für die Geschwindigkeits-Pfeile
@@ -407,25 +466,36 @@ class BrushBotSwarmParallelEnv(ParallelEnv):
         self.figure.canvas.flush_events()
 
     # Methode zur Initialisierung der Roboter als Ray Actors
-    def init_robots(self):
+    def init_robots(self, start_positions=None, start_orientations=None):
         robots = []
         for i in range(self.num_robots):
             half_size = self.container_size / 2
-            # Initialisiere BrushBots innerhalb des Behälters mit einem Puffer, um Kollisionen bei Start zu vermeiden
-            x = random.uniform(-half_size + 0.05, half_size - 0.05)
-            y = random.uniform(-half_size + 0.05, half_size - 0.05)
-            w1 = 500
-            w2 = 500
+            # Startposition festlegen
+            if start_positions and i < len(start_positions) and start_positions[i] is not None:
+                x, y = start_positions[i]
+            else:
+                # Initialisiere BrushBots innerhalb des Behälters mit einem Puffer, um Kollisionen bei Start zu vermeiden
+                x = random.uniform(-half_size + 0.05, half_size - 0.05)
+                y = random.uniform(-half_size + 0.05, half_size - 0.05)
+
+            # Setze die Richtung
+            if start_orientations and i < len(start_orientations) and start_orientations[i] is not None:
+                direction = start_orientations[i]
+            else:
+                direction = None  # zufällige Richtungen
+
+            w1 = 100
+            w2 = 100
             mass = 1.0
             radius = 0.03
             seed = self.seeds[i] if self.use_same_seed else self.seeds[i]
             agent_name = self.agents[i]
-            robot = RayBrushBot.remote(agent_name, w1, w2, x, y, mass, radius, seed)
+            robot = RayBrushBot.remote(agent_name, w1, w2, x, y, mass, radius, seed, direction)
             robots.append(robot)
         return robots
 
     # Reset-Methode zur Initialisierung der Umgebung
-    def reset(self, seed=None, options=None, center=None):
+    def reset(self, seed=None, options=None, center=None, start_positions=None, start_orientations=None):
         if seed is not None:
             random.seed(seed)
             torch.manual_seed(seed)
@@ -439,7 +509,10 @@ class BrushBotSwarmParallelEnv(ParallelEnv):
             self.seeds = [random.randint(0, 10000) for _ in range(self.num_robots)]
 
         # Initialisierung der Roboter mit zufälligen Startpositionen und Geschwindigkeiten
-        self.robots = self.init_robots()
+        self.robots = self.init_robots(start_positions=start_positions, start_orientations=start_orientations)
+
+        # Initialisierung der Roboter mit Startpositionen in der Mitte
+        # self.robots = [RayBrushBot.remote([0.0, 0.0], self.seeds[i]) for i in range(self.num_robots)]
 
         # Alle Agenten sind zu Beginn aktiv
         self.agents = self.possible_agents[:]
@@ -579,7 +652,9 @@ class BrushBotSwarmParallelEnv(ParallelEnv):
             if distance < (2 * radius):
                 # Erhöhe den Kollisionszähler
                 self.collision_count += 1
-                logging.info(f"Kollision zwischen {self.agents[idx]} und {self.agents[jdx]} an Positionen {pos_i} und {pos_j}")
+                logging.info(
+                    f"Kollision zwischen {self.agents[idx]} und {self.agents[jdx]} an Positionen {pos_i} und {pos_j}"
+                )
 
                 # Überlappungskorrektur
                 overlap = 2 * radius - distance
@@ -616,8 +691,8 @@ class BrushBotSwarmParallelEnv(ParallelEnv):
         inertia_j = ray.get(bot_j.get_inertia.remote())
 
         # Compute kinetic energies before collision
-        ke_i_before = 0.5 * mass_i * np.linalg.norm(vel_i_before) ** 2 + 0.5 * inertia_i * omega_i_before ** 2
-        ke_j_before = 0.5 * mass_j * np.linalg.norm(vel_j_before) ** 2 + 0.5 * inertia_j * omega_j_before ** 2
+        ke_i_before = 0.5 * mass_i * np.linalg.norm(vel_i_before) ** 2 + 0.5 * inertia_i * omega_i_before**2
+        ke_j_before = 0.5 * mass_j * np.linalg.norm(vel_j_before) ** 2 + 0.5 * inertia_j * omega_j_before**2
 
         # Calculate collision normals
         pos_i = ray.get(bot_i.get_position.remote())
@@ -652,33 +727,50 @@ class BrushBotSwarmParallelEnv(ParallelEnv):
         # Impulsvektor
         impulse = impulse_scalar * collision_normal
 
-        # Apply forces and torques
-        bot_i.apply_force.remote(impulse)
-        bot_j.apply_force.remote(-impulse)
-        torque_i = np.cross(r_i, impulse)
-        torque_j = np.cross(r_j, -impulse)
-        bot_i.apply_torque.remote(torque_i)
-        bot_j.apply_torque.remote(torque_j)
+        # **Entferne oder kommentiere die folgenden Zeilen:**
+        # Apply forces and torques (Diese Zeilen entfernen)
+        # bot_i.apply_force.remote(impulse)
+        # bot_j.apply_force.remote(-impulse)
+        # torque_i = np.cross(r_i, impulse)
+        # torque_j = np.cross(r_j, -impulse)
+        # bot_i.apply_torque.remote(torque_i)
+        # bot_j.apply_torque.remote(torque_j)
 
-        # Compute velocities after collision
-        vel_i_after = vel_i_before + impulse / mass_i
-        vel_j_after = vel_j_before - impulse / mass_j
-        omega_i_after = omega_i_before + torque_i / inertia_i
-        omega_j_after = omega_j_before + torque_j / inertia_j
+        # **Berechne die neuen Geschwindigkeiten direkt:**
+        vel_i_after = vel_i_before + (impulse / mass_i)
+        vel_j_after = vel_j_before - (impulse / mass_j)
+        omega_i_after = omega_i_before + (np.cross(r_i, impulse) / inertia_i)
+        omega_j_after = omega_j_before + (np.cross(r_j, -impulse) / inertia_j)
+
+        # **Setze die neuen Geschwindigkeiten und Winkelgeschwindigkeiten:**
+        bot_i.set_velocity.remote(vel_i_after)
+        bot_j.set_velocity.remote(vel_j_after)
+        bot_i.set_angular_velocity.remote(omega_i_after)
+        bot_j.set_angular_velocity.remote(omega_j_after)
 
         # Compute kinetic energies after collision
-        ke_i_after = 0.5 * mass_i * np.linalg.norm(vel_i_after) ** 2 + 0.5 * inertia_i * omega_i_after ** 2
-        ke_j_after = 0.5 * mass_j * np.linalg.norm(vel_j_after) ** 2 + 0.5 * inertia_j * omega_j_after ** 2
+        ke_i_after = 0.5 * mass_i * np.linalg.norm(vel_i_after) ** 2 + 0.5 * inertia_i * omega_i_after**2
+        ke_j_after = 0.5 * mass_j * np.linalg.norm(vel_j_after) ** 2 + 0.5 * inertia_j * omega_j_after**2
 
         # Output collision information
         logging.info(f"Kollision zwischen {agent_i} und {agent_j}:")
         logging.info(f"Vor der Kollision:")
-        logging.info(f"  {agent_i}: velocity={vel_i_before}, angular_velocity={omega_i_before}, kinetic_energy={ke_i_before}")
-        logging.info(f"  {agent_j}: velocity={vel_j_before}, angular_velocity={omega_j_before}, kinetic_energy={ke_j_before}")
-        logging.info(f"Angewendeter Impuls: {impulse}, Drehmomente: {torque_i}, {torque_j}")
+        logging.info(
+            f"  {agent_i}: velocity={vel_i_before}, angular_velocity={omega_i_before}, kinetic_energy={ke_i_before}"
+        )
+        logging.info(
+            f"  {agent_j}: velocity={vel_j_before}, angular_velocity={omega_j_before}, kinetic_energy={ke_j_before}"
+        )
+        logging.info(
+            f"Angewendeter Impuls: {impulse}, Drehmomente: {np.cross(r_i, impulse)}, {np.cross(r_j, -impulse)}"
+        )
         logging.info(f"Nach der Kollision:")
-        logging.info(f"  {agent_i}: velocity={vel_i_after}, angular_velocity={omega_i_after}, kinetic_energy={ke_i_after}")
-        logging.info(f"  {agent_j}: velocity={vel_j_after}, angular_velocity={omega_j_after}, kinetic_energy={ke_j_after}")
+        logging.info(
+            f"  {agent_i}: velocity={vel_i_after}, angular_velocity={omega_i_after}, kinetic_energy={ke_i_after}"
+        )
+        logging.info(
+            f"  {agent_j}: velocity={vel_j_after}, angular_velocity={omega_j_after}, kinetic_energy={ke_j_after}"
+        )
 
     # Render-Methode zur Visualisierung der Umgebung
     def render(self, mode="human"):
@@ -715,6 +807,8 @@ class BrushBotSwarmParallelEnv(ParallelEnv):
         # Zeichne die Wand (nur einmal hinzufügen, um Mehrfachzeichnungen zu vermeiden)
         if not hasattr(self, "wall_patch"):
             half_size = self.container_size / 2
+            self.ax.set_xlim(-half_size, half_size)  # später nochmal prüfen
+            self.ax.set_ylim(-half_size, half_size)
             self.wall_patch = plt.Rectangle(
                 (-half_size, -half_size),
                 self.container_size,
@@ -767,11 +861,30 @@ if __name__ == "__main__":
     ray.init()
 
     # Setze show_grid auf True, um das Gitter anzuzeigen
-    env = BrushBotSwarmParallelEnv(num_robots=8, use_same_seed=False, container_size=2.0, cell_size=0.1, show_grid=True)
+    env = BrushBotSwarmParallelEnv(num_robots=2, use_same_seed=True, container_size=2.0, cell_size=0.1, show_grid=True)
     env.initialize_time_lists()
 
+    # Definiere Startpositionen für Roboter 1 und 2 (Index o und 1)
+    start_positions = [
+         #(0.0, 0.0),
+         #(0.5, 0.5),
+         (-0.5, 0.0),  # Roboter 0
+         (0.5, 0.0),  # Roboter 1
+        #None,
+        #None,
+    ]
+
+    start_orientations = [
+         0.0,
+         math.pi,  # Roboter 1 blickt nach links (negative x-Richtung)
+        #None,
+       # None,
+    ]
+
     # Initialisierung der Umgebung und der Roboter
-    observations, infos = env.reset(seed=37)
+    observations, infos = env.reset(
+        seed=3, start_positions=start_positions, start_orientations=start_orientations
+    )  # seed = 5
     total_rewards = dict.fromkeys(env.agents, 0)
 
     # Anzahl der Iterationen
@@ -788,12 +901,12 @@ if __name__ == "__main__":
 
         # Ausgabe der aktuellen Aktionen und Beobachtungen für jeden Roboter
         print(f"Step {step}:")
-        # for agent in env.agents:
-        #     print(f"{agent} - Action: {actions[agent]}, Observation: {observations[agent]}")
+        for agent in env.agents:
+            print(f"{agent} - Action: {actions[agent]}, Observation: {observations[agent]}")
 
         for agent, reward in rewards.items():
             total_rewards[agent] += reward
-            if step % 500 == 0:
+            if step % 10 == 0:
                 env.render()
         step += 1
 
