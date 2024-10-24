@@ -65,6 +65,8 @@ class BrushBot:
         direction=None,
         initial_rotation=0.0,
     ):
+        # Konfiguriere das Logging
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
         if seed is not None:
             torch.manual_seed(seed)
             random.seed(seed)
@@ -173,10 +175,10 @@ class BrushBot:
         self.external_torque = 0.0
 
         # Debugging-Ausgabe der Geschwindigkeit
-        logging.info(
-            f"{self.agent_name}: v_net={self.v_net}, velocity={self.velocity.cpu().numpy()}, "
-            f"position={self.position.cpu().numpy()}"
-        )
+        # logging.info(
+        #    f"{self.agent_name}: v_net={self.v_net}, velocity={self.velocity.cpu().numpy()}, "
+        #    f"position={self.position.cpu().numpy()}"
+        # )
 
     # Methode zur Aktualisierung der Position basierend auf der Geschwindigkeit
     def update_position(self):
@@ -195,33 +197,60 @@ class BrushBot:
         inertia = self.inertia
         ke_before = 0.5 * mass * np.linalg.norm(vel_before) ** 2 + 0.5 * inertia * omega_before**2
 
-        offset = 1e-5  # Kleiner Wert, um den Roboter leicht von der Wand zu entfernen
+        # Anzahl der Punkte zur Diskretisierung der Ellipse
+        num_points = 36  # Erhöhen für höhere Genauigkeit
 
-        # Links oder Rechts
-        if self.position[0] - self.width / 2 <= -half_size:
-            self.velocity[0] *= -1
-            self.position[0] = -half_size + self.width / 2 + offset
-            collided = True
-            self.angular_velocity *= -1
-        elif self.position[0] + self.width / 2 >= half_size:
-            self.velocity[0] *= -1
-            self.position[0] = half_size - self.width / 2 - offset
-            collided = True
-            self.angular_velocity *= -1
+        # Generiere Winkel von 0 bis 2π
+        theta = np.linspace(0, 2 * np.pi, num_points)
 
-        # Oben oder Unten
-        if self.position[1] - self.height / 2 <= -half_size:
-            self.velocity[1] *= -1
-            self.position[1] = -half_size + self.height / 2 + offset
-            collided = True
+        # Halbachsen
+        a = self.width / 2
+        b = self.height / 2
+
+        # Rotationswinkel
+        phi = self.rotation
+
+        # Position des Roboters
+        x0, y0 = self.position.cpu().numpy()
+
+        # Berechne die Punkte auf der Ellipse unter Berücksichtigung der Rotation
+        cos_phi = np.cos(phi)
+        sin_phi = np.sin(phi)
+        cos_theta = np.cos(theta)
+        sin_theta = np.sin(theta)
+
+        x = x0 + a * cos_theta * cos_phi - b * sin_theta * sin_phi
+        y = y0 + a * cos_theta * sin_phi + b * sin_theta * cos_phi
+
+        # Prüfe, ob irgendein Punkt außerhalb der Grenzen liegt
+        outside_left = x < -half_size
+        outside_right = x > half_size
+        outside_bottom = y < -half_size
+        outside_top = y > half_size
+
+        # Wenn Kollision, reagiere entsprechend
+        if np.any(outside_left):
+            self.velocity[0] = abs(self.velocity[0])  # Richtung umkehren
             self.angular_velocity *= -1
-        elif self.position[1] + self.height / 2 >= half_size:
-            self.velocity[1] *= -1
-            self.position[1] = half_size - self.height / 2 - offset
             collided = True
+        if np.any(outside_right):
+            self.velocity[0] = -abs(self.velocity[0])  # Richtung umkehren
             self.angular_velocity *= -1
+            collided = True
+        if np.any(outside_bottom):
+            self.velocity[1] = abs(self.velocity[1])  # Richtung umkehren
+            self.angular_velocity *= -1
+            collided = True
+        if np.any(outside_top):
+            self.velocity[1] = -abs(self.velocity[1])  # Richtung umkehren
+            self.angular_velocity *= -1
+            collided = True
 
         if collided:
+            # Optional: Position anpassen, um innerhalb der Grenzen zu bleiben
+            self.position[0] = torch.clamp(self.position[0], -half_size + a, half_size - a)
+            self.position[1] = torch.clamp(self.position[1], -half_size + b, half_size - b)
+
             # Geschwindigkeit und Winkelgeschwindigkeit nach der Kollision
             vel_after = self.velocity.clone().cpu().numpy()
             omega_after = self.angular_velocity
@@ -321,21 +350,21 @@ class BrushBot:
 
     # Methode zum zufälligen Auswählen einer Aktion
 
-    def sample_action(self):
-        freq1 = random.randint(1, 5)
-        freq2 = random.randint(1, 5)
-        while freq2 == freq1:
-            freq2 = random.randint(1, 5)
-        return [freq1, freq2]
-
     # def sample_action(self):
-    #    if self.agent_name == "robot_1":
-    #        freq1 = 3
-    #        freq2 = 3
-    #   else:
-    #       freq1 = 1
-    #        freq2 = 1
+    #    freq1 = random.randint(1, 5)
+    #    freq2 = random.randint(1, 5)
+    #    while freq2 == freq1:
+    #        freq2 = random.randint(1, 5)
     #    return [freq1, freq2]
+
+    def sample_action(self):
+        if self.agent_name == "robot_1":
+            freq1 = 3
+            freq2 = 3
+        else:
+            freq1 = 3
+            freq2 = 3
+        return [freq1, freq2]
 
     def set_velocity(self, new_velocity):
         self.velocity = torch.tensor(new_velocity, dtype=torch.float32, device=device)
@@ -374,6 +403,8 @@ class RayBrushBot:
             direction,
             initial_rotation,
         )
+        # Konfiguriere das Logging
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
     def perform_action(self, action):
         return self.bot.perform_action(action)
@@ -992,43 +1023,31 @@ if __name__ == "__main__":
     ray.init()
 
     # Setze die Anzahl der Roboter auf 4
-    env = BrushBotSwarmParallelEnv(num_robots=4, use_same_seed=False, container_size=2.0, cell_size=0.1, show_grid=True)
+    env = BrushBotSwarmParallelEnv(num_robots=5, use_same_seed=True, container_size=2.0, cell_size=0.1, show_grid=True)
     env.initialize_time_lists()
 
     # Startpositionen der Roboter
     start_positions = [
-        # (-0.5, 0.0),  # Roboter 0
-        # (0.5, 0.0),  # Roboter 1
+        (-0.5, 0.0),  # Roboter 0
+        (0.5, 0.0),  # Roboter 1
         # (0.0, -0.5),  # Roboter 2
         # (0.0, 0.5),  # Roboter 3
-        None,
-        None,
-        None,
-        None,
     ]
 
     # Startorientierungen der Roboter (sie schauen zur Mitte)
     start_orientations = [
-        # 0.0,  # Roboter 0 blickt nach rechts
-        # math.pi,  # Roboter 1 blickt nach links
+        0.0,  # Roboter 0 blickt nach rechts
+        math.pi,  # Roboter 1 blickt nach links
         # math.pi / 2,  # Roboter 2 blickt nach oben
         # 3 * math.pi / 2,  # Roboter 3 blickt nach unten
-        0.0,
-        0.0,
-        0.0,
-        0.0,
     ]
 
     # Startrotationen der Roboterkörper (optional)
     start_rotations = [
-        # 0.0,  # Roboter 0
-        # math.pi,  # Roboter 1
+        0.0,  # Roboter 0
+        math.pi,  # Roboter 1
         # math.pi / 2,  # Roboter 2
         # 3 * math.pi / 2,  # Roboter 3
-        0.0,
-        0.0,
-        0.0,
-        0.0,
     ]
 
     # Initialisierung der Umgebung und der Roboter
@@ -1041,7 +1060,7 @@ if __name__ == "__main__":
     total_rewards = dict.fromkeys(env.agents, 0)
 
     # Anzahl der Iterationen
-    num_iterations = 1000  # Anpassen, um die Simulation zu steuern
+    num_iterations = 10000  # Anpassen, um die Simulation zu steuern
 
     step = 0
     while step < num_iterations and env.agents:
@@ -1049,8 +1068,8 @@ if __name__ == "__main__":
         actions = {}
         for agent in env.agents:
             if agent == "robot_1":
-                freq_left = random.randint(1, 5)  # Frequenz für die linke Bürste
-                freq_right = random.randint(1, 5)  # Frequenz für die rechte Bürste
+                freq_left = 3  # Frequenz für die linke Bürste
+                freq_right = 3  # Frequenz für die rechte Bürste
                 actions[agent] = [freq_left, freq_right]
             else:
                 actions[agent] = ray.get(env.robots[env.agents.index(agent)].sample_action.remote())
@@ -1059,8 +1078,8 @@ if __name__ == "__main__":
 
         # Ausgabe der aktuellen Aktionen und Beobachtungen für jeden Roboter
         print(f"Step {step}:")
-        for agent in env.agents:
-            print(f"{agent} - Action: {actions[agent]}, Observation: {observations[agent]}")
+        # for agent in env.agents:
+        #    print(f"{agent} - Action: {actions[agent]}, Observation: {observations[agent]}")
 
         for agent, reward in rewards.items():
             total_rewards[agent] += reward
